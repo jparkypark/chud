@@ -11,12 +11,13 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-// Cache Codex data for 5 minutes to avoid slow CLI calls
-const CODEX_CACHE_TTL_MS = 5 * 60 * 1000;
+// Default cache TTL (can be overridden in config)
+const DEFAULT_CACHE_TTL_MINUTES = 1;
 const CACHE_DIR = join(homedir(), '.cache', 'chud');
+const CLAUDE_CACHE_FILE = join(CACHE_DIR, 'claude-usage.json');
 const CODEX_CACHE_FILE = join(CACHE_DIR, 'codex-usage.json');
 
-interface CodexCacheData {
+interface UsageCacheData {
   date: string;
   cost: number;
   inputTokens: number;
@@ -58,6 +59,43 @@ function getSystemTimezone(): string {
   }
 }
 
+/**
+ * Load cached data if valid (same date and not expired)
+ */
+function loadCache(cacheFile: string, today: string, cacheTtlMs: number): UsageCacheData | null {
+  try {
+    if (!existsSync(cacheFile)) return null;
+
+    const cached: UsageCacheData = JSON.parse(
+      readFileSync(cacheFile, 'utf-8')
+    );
+
+    // Check if cache is valid (same date and not expired)
+    const now = Date.now();
+    if (cached.date === today && now - cached.timestamp < cacheTtlMs) {
+      return cached;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save data to cache
+ */
+function saveCache(cacheFile: string, data: UsageCacheData): void {
+  try {
+    if (!existsSync(CACHE_DIR)) {
+      mkdirSync(CACHE_DIR, { recursive: true });
+    }
+    writeFileSync(cacheFile, JSON.stringify(data));
+  } catch {
+    // Ignore cache write errors
+  }
+}
+
 interface CodexDailyData {
   daily: Array<{
     date: string;
@@ -74,46 +112,9 @@ interface CodexDailyData {
 }
 
 /**
- * Load cached Codex data if valid
- */
-function loadCodexCache(today: string): CodexCacheData | null {
-  try {
-    if (!existsSync(CODEX_CACHE_FILE)) return null;
-
-    const cached: CodexCacheData = JSON.parse(
-      readFileSync(CODEX_CACHE_FILE, 'utf-8')
-    );
-
-    // Check if cache is valid (same date and not expired)
-    const now = Date.now();
-    if (cached.date === today && now - cached.timestamp < CODEX_CACHE_TTL_MS) {
-      return cached;
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Save Codex data to cache
- */
-function saveCodexCache(data: CodexCacheData): void {
-  try {
-    if (!existsSync(CACHE_DIR)) {
-      mkdirSync(CACHE_DIR, { recursive: true });
-    }
-    writeFileSync(CODEX_CACHE_FILE, JSON.stringify(data));
-  } catch {
-    // Ignore cache write errors
-  }
-}
-
-/**
  * Fetch today's Codex usage via @ccusage/codex CLI (with caching)
  */
-async function loadCodexTodayData(timezone: string): Promise<{
+async function loadCodexTodayData(timezone: string, cacheTtlMs: number): Promise<{
   cost: number;
   inputTokens: number;
   outputTokens: number;
@@ -121,7 +122,7 @@ async function loadCodexTodayData(timezone: string): Promise<{
   const today = getTodayDate();
 
   // Check cache first
-  const cached = loadCodexCache(today);
+  const cached = loadCache(CODEX_CACHE_FILE, today, cacheTtlMs);
   if (cached) {
     return {
       cost: cached.cost,
@@ -132,13 +133,12 @@ async function loadCodexTodayData(timezone: string): Promise<{
 
   try {
     // Run ccusage-codex with JSON output, filtering to today only
-    // Use Bun.spawn for async execution with shorter timeout
     const proc = Bun.spawn(
       ['bunx', '@ccusage/codex@latest', 'daily', '--json', '--since', today, '--timezone', timezone],
       { stdout: 'pipe', stderr: 'pipe' }
     );
 
-    // Set a 5 second timeout (much shorter than original 30s)
+    // Set a 5 second timeout
     const timeoutPromise = new Promise<null>((resolve) =>
       setTimeout(() => {
         proc.kill();
@@ -167,7 +167,7 @@ async function loadCodexTodayData(timezone: string): Promise<{
     };
 
     // Cache the result
-    saveCodexCache({
+    saveCache(CODEX_CACHE_FILE, {
       date: today,
       ...result,
       timestamp: Date.now(),
@@ -175,7 +175,84 @@ async function loadCodexTodayData(timezone: string): Promise<{
 
     return result;
   } catch {
-    // Silently fail if Codex CLI not available or errors
+    return { cost: 0, inputTokens: 0, outputTokens: 0 };
+  }
+}
+
+/**
+ * Load today's Claude Code usage via ccusage (with caching)
+ * Cache TTL is configurable to balance freshness vs performance
+ */
+async function loadClaudeTodayData(timezone: string, cacheTtlMs: number): Promise<{
+  cost: number;
+  inputTokens: number;
+  outputTokens: number;
+}> {
+  const today = getTodayDate();
+
+  // Check cache first - this is the key optimization
+  const cached = loadCache(CLAUDE_CACHE_FILE, today, cacheTtlMs);
+  if (cached) {
+    return {
+      cost: cached.cost,
+      inputTokens: cached.inputTokens,
+      outputTokens: cached.outputTokens,
+    };
+  }
+
+  try {
+    // Suppress ccusage logging
+    const originalStderr = console.error;
+    const originalConsoleLog = console.log;
+    const originalConsoleInfo = console.info;
+    const originalConsoleWarn = console.warn;
+    const originalProcessStderrWrite = process.stderr.write;
+    const originalProcessStdoutWrite = process.stdout.write;
+
+    console.error = () => {};
+    console.log = () => {};
+    console.info = () => {};
+    console.warn = () => {};
+    process.stderr.write = () => true;
+    process.stdout.write = () => true;
+
+    try {
+      // Load data using ccusage (slow but accurate)
+      const data = await loadDailyUsageData({
+        offline: false,
+        timezone,
+      });
+
+      // Find today's data
+      const todayData = data.find((d) => d.date === today);
+
+      const result = todayData
+        ? {
+            cost: todayData.totalCost,
+            inputTokens: todayData.inputTokens,
+            outputTokens: todayData.outputTokens,
+          }
+        : { cost: 0, inputTokens: 0, outputTokens: 0 };
+
+      // Cache the result for 5 minutes
+      saveCache(CLAUDE_CACHE_FILE, {
+        date: today,
+        ...result,
+        timestamp: Date.now(),
+      });
+
+      return result;
+    } finally {
+      // Restore console methods
+      console.error = originalStderr;
+      console.log = originalConsoleLog;
+      console.info = originalConsoleInfo;
+      console.warn = originalConsoleWarn;
+      process.stderr.write = originalProcessStderrWrite;
+      process.stdout.write = originalProcessStdoutWrite;
+    }
+  } catch (error) {
+    console.error('[chud] Failed to load usage data from ccusage:', error);
     return { cost: 0, inputTokens: 0, outputTokens: 0 };
   }
 }
@@ -191,76 +268,32 @@ export class UsageSegment extends Segment {
   }
 
   /**
-   * Load today's data from ccusage
+   * Get cache TTL in milliseconds from config
+   */
+  private getCacheTtlMs(): number {
+    const minutes = this.config.display.cacheTtlMinutes ?? DEFAULT_CACHE_TTL_MINUTES;
+    return minutes * 60 * 1000;
+  }
+
+  /**
+   * Load today's data from ccusage (with disk caching)
    */
   async loadTodayData(): Promise<{
     cost: number;
     inputTokens: number;
     outputTokens: number;
   }> {
-    try {
-      const today = getTodayDate();
-      const timezone = getSystemTimezone();
-
-      // Suppress ccusage logging by temporarily redirecting all output
-      const originalStderr = console.error;
-      const originalConsoleLog = console.log;
-      const originalConsoleInfo = console.info;
-      const originalConsoleWarn = console.warn;
-      const originalProcessStderrWrite = process.stderr.write;
-      const originalProcessStdoutWrite = process.stdout.write;
-
-      console.error = () => {};
-      console.log = () => {};
-      console.info = () => {};
-      console.warn = () => {};
-      process.stderr.write = () => true;
-      process.stdout.write = () => true;
-
-      try {
-        // Load all data using ccusage
-        // Use offline: false to fetch latest pricing (includes newer models like haiku-4-5)
-        const data = await loadDailyUsageData({
-          offline: false,
-          timezone,
-        });
-
-        // Find today's data
-        const todayData = data.find((d) => d.date === today);
-
-        return todayData
-          ? {
-              cost: todayData.totalCost,
-              inputTokens: todayData.inputTokens,
-              outputTokens: todayData.outputTokens,
-            }
-          : { cost: 0, inputTokens: 0, outputTokens: 0 };
-      } finally {
-        // Restore console and process methods
-        console.error = originalStderr;
-        console.log = originalConsoleLog;
-        console.info = originalConsoleInfo;
-        console.warn = originalConsoleWarn;
-        process.stderr.write = originalProcessStderrWrite;
-        process.stdout.write = originalProcessStdoutWrite;
-      }
-    } catch (error) {
-      console.error('[chud] Failed to load usage data from ccusage:', error);
-      return { cost: 0, inputTokens: 0, outputTokens: 0 };
-    }
+    const timezone = getSystemTimezone();
+    return loadClaudeTodayData(timezone, this.getCacheTtlMs());
   }
 
   render(input: ClaudeCodeInput, db: DatabaseClient): SegmentData {
     const { display, colors } = this.config;
 
-    // Note: render() is synchronous, but we need async data
-    // We'll need to handle this in the main entry point
-    // For now, show cached data or placeholder
     const parts: string[] = [];
 
-    // Add icon if enabled
     if (display.icon) {
-      parts.push('Σ');  // Sigma - summation (daily total)
+      parts.push('Σ');
     }
 
     if (display.cost) {
@@ -273,7 +306,6 @@ export class UsageSegment extends Segment {
       parts.push(formatTokens(totalTokens));
     }
 
-    // Always show period label if enabled
     if (display.period) {
       parts.push(display.period);
     }
@@ -290,11 +322,12 @@ export class UsageSegment extends Segment {
    */
   async updateCache(): Promise<void> {
     const timezone = getSystemTimezone();
+    const cacheTtlMs = this.getCacheTtlMs();
 
     // Fetch Claude Code and Codex usage in parallel
     const [claudeData, codexData] = await Promise.all([
       this.loadTodayData(),
-      loadCodexTodayData(timezone),
+      loadCodexTodayData(timezone, cacheTtlMs),
     ]);
 
     // Combine costs and tokens

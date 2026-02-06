@@ -29,6 +29,7 @@ export interface UsageSegmentDisplay {
   cost: boolean;
   tokens: boolean;
   period: 'today';  // Only 'today' in MVP
+  cacheTtlMinutes?: number;  // Cache TTL for ccusage data (default: 1 minute)
 }
 
 export interface UsageSegmentConfig {

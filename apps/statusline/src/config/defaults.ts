@@ -50,6 +50,7 @@ export const DEFAULT_CONFIG: Config = {
         cost: true,
         tokens: false,
         period: 'today',
+        cacheTtlMinutes: 1,  // Cache ccusage results for 1 minute
       },
       colors: {
         fg: '#ffffff',
@@ -61,7 +62,7 @@ export const DEFAULT_CONFIG: Config = {
       display: {
         icon: true,
         period: 'hourly',
-        halfLifeMinutes: 7,  // ~10 minute effective window for EWMA smoothing
+        halfLifeMinutes: 60,  // ~87 minute effective window - good for daily cost projection
       },
       colors: {
         fg: '#ffffff',
