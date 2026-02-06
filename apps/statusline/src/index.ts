@@ -8,6 +8,8 @@ import { loadConfig } from './config';
 import { DatabaseClient } from './database';
 import { createSegment } from './segments';
 import { renderPowerline } from './renderer';
+import { UsageSegment } from './segments/usage';
+import { PaceSegment } from './segments/pace';
 
 /**
  * Read JSON from stdin
@@ -57,18 +59,34 @@ async function main() {
       })
     );
 
-    // 5. Render each segment
+    // 5. Persist usage and pace data to database for charts
+    for (const segment of segments) {
+      if (segment instanceof UsageSegment) {
+        const data = segment.getCachedData();
+        if (data) {
+          db.recordDailyUsage(data.date, data.cost, data.inputTokens, data.outputTokens);
+        }
+      }
+      if (segment instanceof PaceSegment) {
+        const pace = segment.getCachedPace();
+        if (pace !== null) {
+          db.recordPaceSnapshot(pace);
+        }
+      }
+    }
+
+    // 6. Render each segment
     const segmentDataList = segments.map((segment) =>
       segment.render(sessionData, db)
     );
 
-    // 6. Apply powerline styling
+    // 7. Apply powerline styling
     const statusline = renderPowerline(segmentDataList, config.theme);
 
-    // 7. Output to stdout
+    // 8. Output to stdout
     console.log(statusline);
 
-    // 8. Close database connection
+    // 9. Close database connection
     db.close();
   } catch (error) {
     // Log errors to stderr (not stdout, to avoid breaking statusline)

@@ -45,4 +45,11 @@ export class PaceSegment extends Segment {
     });
     this.cachedPace = hourlyUsage.pace;
   }
+
+  /**
+   * Get the cached pace for persistence to database
+   */
+  getCachedPace(): number | null {
+    return this.cachedPace;
+  }
 }

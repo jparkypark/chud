@@ -14,6 +14,20 @@ struct ProjectTime {
     let totalMinutes: Int
 }
 
+/// Represents daily usage cost
+struct DailyUsage {
+    let date: String
+    let cost: Double
+    let inputTokens: Int
+    let outputTokens: Int
+}
+
+/// Represents a pace snapshot
+struct PaceSnapshot {
+    let timestamp: Int64
+    let pace: Double
+}
+
 /// Client for reading session data from the shared SQLite database.
 /// Uses the SQLite3 C API directly for maximum compatibility.
 class DatabaseClient {
@@ -217,6 +231,82 @@ class DatabaseClient {
             let cwd = String(cString: sqlite3_column_text(statement, 0))
             let totalMinutes = Int(sqlite3_column_int(statement, 1))
             results.append(ProjectTime(cwd: cwd, totalMinutes: totalMinutes))
+        }
+
+        return results
+    }
+
+    /// Returns daily usage costs for the past N days
+    func getDailyUsage(days: Int = 28) -> [DailyUsage] {
+        guard open() else { return [] }
+        defer { close() }
+
+        var results: [DailyUsage] = []
+
+        // Calculate cutoff date
+        let calendar = Calendar.current
+        guard let cutoffDate = calendar.date(byAdding: .day, value: -days, to: Date()) else {
+            return []
+        }
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let cutoffStr = dateFormatter.string(from: cutoffDate)
+
+        let query = """
+            SELECT date, cost, input_tokens, output_tokens
+            FROM usage_daily
+            WHERE date >= ?
+            ORDER BY date ASC
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else {
+            print("[chud] Failed to prepare daily usage query")
+            return []
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, cutoffStr, -1, nil)
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let date = String(cString: sqlite3_column_text(statement, 0))
+            let cost = sqlite3_column_double(statement, 1)
+            let inputTokens = Int(sqlite3_column_int(statement, 2))
+            let outputTokens = Int(sqlite3_column_int(statement, 3))
+            results.append(DailyUsage(date: date, cost: cost, inputTokens: inputTokens, outputTokens: outputTokens))
+        }
+
+        return results
+    }
+
+    /// Returns pace snapshots for the past N days
+    func getPaceSnapshots(days: Int = 28) -> [PaceSnapshot] {
+        guard open() else { return [] }
+        defer { close() }
+
+        var results: [PaceSnapshot] = []
+        let cutoffMs = (Int64(Date().timeIntervalSince1970) - Int64(days * 86400)) * 1000
+
+        let query = """
+            SELECT timestamp, pace
+            FROM pace_snapshots
+            WHERE timestamp >= ?
+            ORDER BY timestamp ASC
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else {
+            print("[chud] Failed to prepare pace snapshots query")
+            return []
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_int64(statement, 1, cutoffMs)
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let timestamp = sqlite3_column_int64(statement, 0)
+            let pace = sqlite3_column_double(statement, 1)
+            results.append(PaceSnapshot(timestamp: timestamp, pace: pace))
         }
 
         return results

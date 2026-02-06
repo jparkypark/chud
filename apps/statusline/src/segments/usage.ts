@@ -259,7 +259,7 @@ async function loadClaudeTodayData(timezone: string, cacheTtlMs: number): Promis
 
 export class UsageSegment extends Segment {
   protected config: UsageSegmentConfig;
-  private cachedData: { date: string; cost: number; tokens: number } | null =
+  private cachedData: { date: string; cost: number; tokens: number; inputTokens: number; outputTokens: number } | null =
     null;
 
   constructor(config: UsageSegmentConfig) {
@@ -330,15 +330,29 @@ export class UsageSegment extends Segment {
       loadCodexTodayData(timezone, cacheTtlMs),
     ]);
 
+    const inputTokens = claudeData.inputTokens + codexData.inputTokens;
+    const outputTokens = claudeData.outputTokens + codexData.outputTokens;
+
     // Combine costs and tokens
     this.cachedData = {
       date: getTodayDate(),
       cost: claudeData.cost + codexData.cost,
-      tokens:
-        claudeData.inputTokens +
-        claudeData.outputTokens +
-        codexData.inputTokens +
-        codexData.outputTokens,
+      tokens: inputTokens + outputTokens,
+      inputTokens,
+      outputTokens,
+    };
+  }
+
+  /**
+   * Get the cached data for persistence to database
+   */
+  getCachedData(): { date: string; cost: number; inputTokens: number; outputTokens: number } | null {
+    if (!this.cachedData) return null;
+    return {
+      date: this.cachedData.date,
+      cost: this.cachedData.cost,
+      inputTokens: this.cachedData.inputTokens,
+      outputTokens: this.cachedData.outputTokens,
     };
   }
 }

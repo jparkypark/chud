@@ -6,7 +6,7 @@ import { Database } from 'bun:sqlite';
 import { homedir } from 'os';
 import { join } from 'path';
 import { existsSync } from 'fs';
-import type { DailySummary } from './types';
+import type { DailySummary, UsageRecord, PaceSnapshot } from './types';
 
 const DB_PATH = join(homedir(), '.claude', 'statusline-usage.db');
 
@@ -64,6 +64,44 @@ export class DatabaseClient {
     try {
       this.db.exec(`ALTER TABLE hud_sessions ADD COLUMN status TEXT DEFAULT 'unknown'`);
     } catch (_) { /* Column already exists */ }
+
+    // Initialize usage history tables for charts
+    this.initializeUsageHistoryTables();
+  }
+
+  /**
+   * Initialize tables for usage cost and pace history charts
+   */
+  private initializeUsageHistoryTables(): void {
+    if (!this.db) return;
+
+    try {
+      // Daily usage totals (one row per day)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_daily (
+          date TEXT PRIMARY KEY,
+          cost REAL NOT NULL,
+          input_tokens INTEGER NOT NULL,
+          output_tokens INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )
+      `);
+
+      // Pace snapshots (sampled every ~5 minutes)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS pace_snapshots (
+          timestamp INTEGER PRIMARY KEY,
+          pace REAL NOT NULL
+        )
+      `);
+
+      // Index for efficient time-range queries
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_pace_timestamp ON pace_snapshots(timestamp)
+      `);
+    } catch (error) {
+      console.error(`[chud] Failed to create usage history tables: ${error}`);
+    }
   }
 
   /**
@@ -207,6 +245,109 @@ export class DatabaseClient {
     } catch (error) {
       console.error(`[chud] Failed to cleanup old sessions: ${error}`);
       return 0;
+    }
+  }
+
+  /**
+   * Record daily usage totals (upsert)
+   */
+  recordDailyUsage(date: string, cost: number, inputTokens: number, outputTokens: number): void {
+    if (!this.db) return;
+
+    try {
+      const query = this.db.query(`
+        INSERT INTO usage_daily (date, cost, input_tokens, output_tokens, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET
+          cost = excluded.cost,
+          input_tokens = excluded.input_tokens,
+          output_tokens = excluded.output_tokens,
+          updated_at = excluded.updated_at
+      `);
+      query.run(date, cost, inputTokens, outputTokens, Date.now());
+    } catch (error) {
+      console.error(`[chud] Failed to record daily usage: ${error}`);
+    }
+  }
+
+  /**
+   * Record pace snapshot (sampled periodically)
+   * Only records if last snapshot is older than 5 minutes
+   */
+  recordPaceSnapshot(pace: number): void {
+    if (!this.db) return;
+
+    try {
+      const now = Date.now();
+      const fiveMinutesAgo = now - 5 * 60 * 1000;
+
+      // Check if we have a recent snapshot
+      const checkQuery = this.db.query<{ timestamp: number }, []>(
+        'SELECT timestamp FROM pace_snapshots ORDER BY timestamp DESC LIMIT 1'
+      );
+      const latest = checkQuery.get();
+
+      if (latest && latest.timestamp > fiveMinutesAgo) {
+        return; // Skip if last snapshot is recent
+      }
+
+      // Insert new snapshot
+      const insertQuery = this.db.query(
+        'INSERT INTO pace_snapshots (timestamp, pace) VALUES (?, ?)'
+      );
+      insertQuery.run(now, pace);
+
+      // Cleanup old snapshots (keep last 90 days)
+      const cutoff = now - 90 * 24 * 60 * 60 * 1000;
+      this.db.exec(`DELETE FROM pace_snapshots WHERE timestamp < ${cutoff}`);
+    } catch (error) {
+      console.error(`[chud] Failed to record pace snapshot: ${error}`);
+    }
+  }
+
+  /**
+   * Get daily usage for the last N days
+   */
+  getDailyUsage(days: number): UsageRecord[] {
+    if (!this.db) return [];
+
+    try {
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - days);
+      const cutoffStr = cutoffDate.toISOString().split('T')[0];
+
+      const query = this.db.query<UsageRecord, [string]>(`
+        SELECT date, cost, input_tokens, output_tokens
+        FROM usage_daily
+        WHERE date >= ?
+        ORDER BY date ASC
+      `);
+      return query.all(cutoffStr);
+    } catch (error) {
+      console.error(`[chud] Failed to get daily usage: ${error}`);
+      return [];
+    }
+  }
+
+  /**
+   * Get pace snapshots for the last N days
+   */
+  getPaceSnapshots(days: number): PaceSnapshot[] {
+    if (!this.db) return [];
+
+    try {
+      const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+
+      const query = this.db.query<PaceSnapshot, [number]>(`
+        SELECT timestamp, pace
+        FROM pace_snapshots
+        WHERE timestamp >= ?
+        ORDER BY timestamp ASC
+      `);
+      return query.all(cutoffMs);
+    } catch (error) {
+      console.error(`[chud] Failed to get pace snapshots: ${error}`);
+      return [];
     }
   }
 

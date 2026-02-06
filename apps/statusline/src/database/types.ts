@@ -30,3 +30,21 @@ export interface HudSession {
   first_seen_at: number;
   last_seen_at: number;
 }
+
+/**
+ * Daily usage record for charts
+ */
+export interface UsageRecord {
+  date: string;
+  cost: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/**
+ * Pace snapshot for charts
+ */
+export interface PaceSnapshot {
+  timestamp: number;
+  pace: number;
+}
