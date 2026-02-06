@@ -6,7 +6,7 @@ import { Database } from 'bun:sqlite';
 import { homedir } from 'os';
 import { join } from 'path';
 import { existsSync } from 'fs';
-import type { DailySummary, UsageRecord, PaceSnapshot } from './types';
+import type { DailySummary, UsageRecord, PaceSnapshot, UsageSnapshot } from './types';
 
 const DB_PATH = join(homedir(), '.claude', 'statusline-usage.db');
 
@@ -95,9 +95,20 @@ export class DatabaseClient {
         )
       `);
 
+      // Usage snapshots (cumulative cost at point in time, sampled every ~5 minutes)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_snapshots (
+          timestamp INTEGER PRIMARY KEY,
+          cost REAL NOT NULL
+        )
+      `);
+
       // Index for efficient time-range queries
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_pace_timestamp ON pace_snapshots(timestamp)
+      `);
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_snapshots(timestamp)
       `);
     } catch (error) {
       console.error(`[chud] Failed to create usage history tables: ${error}`);
@@ -272,14 +283,14 @@ export class DatabaseClient {
 
   /**
    * Record pace snapshot (sampled periodically)
-   * Only records if last snapshot is older than 5 minutes
+   * Only records if last snapshot is older than 1 minute
    */
   recordPaceSnapshot(pace: number): void {
     if (!this.db) return;
 
     try {
       const now = Date.now();
-      const fiveMinutesAgo = now - 5 * 60 * 1000;
+      const oneMinuteAgo = now - 60 * 1000;
 
       // Check if we have a recent snapshot
       const checkQuery = this.db.query<{ timestamp: number }, []>(
@@ -287,7 +298,7 @@ export class DatabaseClient {
       );
       const latest = checkQuery.get();
 
-      if (latest && latest.timestamp > fiveMinutesAgo) {
+      if (latest && latest.timestamp > oneMinuteAgo) {
         return; // Skip if last snapshot is recent
       }
 
@@ -297,11 +308,46 @@ export class DatabaseClient {
       );
       insertQuery.run(now, pace);
 
-      // Cleanup old snapshots (keep last 90 days)
-      const cutoff = now - 90 * 24 * 60 * 60 * 1000;
+      // Cleanup old snapshots (keep last 7 days)
+      const cutoff = now - 7 * 24 * 60 * 60 * 1000;
       this.db.exec(`DELETE FROM pace_snapshots WHERE timestamp < ${cutoff}`);
     } catch (error) {
       console.error(`[chud] Failed to record pace snapshot: ${error}`);
+    }
+  }
+
+  /**
+   * Record usage snapshot (cumulative cost at point in time)
+   * Only records if last snapshot is older than 1 minute
+   */
+  recordUsageSnapshot(cost: number): void {
+    if (!this.db) return;
+
+    try {
+      const now = Date.now();
+      const oneMinuteAgo = now - 60 * 1000;
+
+      // Check if we have a recent snapshot
+      const checkQuery = this.db.query<{ timestamp: number }, []>(
+        'SELECT timestamp FROM usage_snapshots ORDER BY timestamp DESC LIMIT 1'
+      );
+      const latest = checkQuery.get();
+
+      if (latest && latest.timestamp > oneMinuteAgo) {
+        return; // Skip if last snapshot is recent
+      }
+
+      // Insert new snapshot
+      const insertQuery = this.db.query(
+        'INSERT INTO usage_snapshots (timestamp, cost) VALUES (?, ?)'
+      );
+      insertQuery.run(now, cost);
+
+      // Cleanup old snapshots (keep last 7 days)
+      const cutoff = now - 7 * 24 * 60 * 60 * 1000;
+      this.db.exec(`DELETE FROM usage_snapshots WHERE timestamp < ${cutoff}`);
+    } catch (error) {
+      console.error(`[chud] Failed to record usage snapshot: ${error}`);
     }
   }
 
@@ -347,6 +393,28 @@ export class DatabaseClient {
       return query.all(cutoffMs);
     } catch (error) {
       console.error(`[chud] Failed to get pace snapshots: ${error}`);
+      return [];
+    }
+  }
+
+  /**
+   * Get usage snapshots for the last N days
+   */
+  getUsageSnapshots(days: number): UsageSnapshot[] {
+    if (!this.db) return [];
+
+    try {
+      const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+
+      const query = this.db.query<UsageSnapshot, [number]>(`
+        SELECT timestamp, cost
+        FROM usage_snapshots
+        WHERE timestamp >= ?
+        ORDER BY timestamp ASC
+      `);
+      return query.all(cutoffMs);
+    } catch (error) {
+      console.error(`[chud] Failed to get usage snapshots: ${error}`);
       return [];
     }
   }

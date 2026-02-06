@@ -18,7 +18,7 @@ struct AnalyticsView: View {
     @State private var timeRange: TimeRange = .month
     @State private var heatmapData: [HeatmapCell] = []
     @State private var projectData: [ProjectTime] = []
-    @State private var usageData: [DailyUsage] = []
+    @State private var usageSnapshots: [UsageSnapshot] = []
     @State private var paceData: [PaceSnapshot] = []
 
     private let dbClient = DatabaseClient()
@@ -42,24 +42,13 @@ struct AnalyticsView: View {
 
             Divider()
 
-            // Usage Cost Chart
+            // Combined Usage & Pace Chart
             VStack(alignment: .leading, spacing: 8) {
-                Text("Daily Cost")
+                Text("Usage & Pace")
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
                     .foregroundColor(.secondary)
 
-                UsageCostChart(data: usageData)
-            }
-
-            Divider()
-
-            // Pace Chart
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Pace ($/hr)")
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
-
-                PaceChart(data: paceData)
+                CombinedUsageChart(usageSnapshots: usageSnapshots, paceData: paceData)
             }
 
             Divider()
@@ -99,7 +88,7 @@ struct AnalyticsView: View {
     private func loadData(days: Int) {
         heatmapData = dbClient.getActivityHeatmap(days: days)
         projectData = dbClient.getProjectBreakdown(days: days)
-        usageData = dbClient.getDailyUsage(days: days)
+        usageSnapshots = dbClient.getUsageSnapshots(days: days)
         paceData = dbClient.getPaceSnapshots(days: days)
     }
 }
@@ -238,191 +227,554 @@ struct ProjectBreakdownChart: View {
     }
 }
 
-// MARK: - Usage Cost Chart
+// MARK: - View Mode Toggle
 
-struct UsageCostChart: View {
-    let data: [DailyUsage]
-
-    private var maxCost: Double {
-        data.map(\.cost).max() ?? 1
-    }
-
-    private var totalCost: Double {
-        data.reduce(0) { $0 + $1.cost }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if data.isEmpty {
-                Text("No usage data yet")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.secondary)
-            } else {
-                // Summary line
-                HStack {
-                    Text("Total: $\(String(format: "%.2f", totalCost))")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    Spacer()
-                    Text("Avg: $\(String(format: "%.2f", totalCost / Double(data.count)))/day")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
-
-                // Bar chart
-                GeometryReader { geometry in
-                    let barWidth = max(4, (geometry.size.width - CGFloat(data.count - 1) * 2) / CGFloat(data.count))
-
-                    HStack(alignment: .bottom, spacing: 2) {
-                        ForEach(Array(data.enumerated()), id: \.offset) { _, usage in
-                            let height = maxCost > 0
-                                ? CGFloat(usage.cost) / CGFloat(maxCost) * geometry.size.height
-                                : 0
-
-                            VStack(spacing: 0) {
-                                Spacer(minLength: 0)
-                                RoundedRectangle(cornerRadius: 2)
-                                    .fill(Color.green.opacity(0.8))
-                                    .frame(width: barWidth, height: max(2, height))
-                            }
-                        }
-                    }
-                }
-                .frame(height: 60)
-
-                // X-axis labels (first and last date)
-                if let first = data.first, let last = data.last {
-                    HStack {
-                        Text(abbreviateDate(first.date))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Text(abbreviateDate(last.date))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
-        }
-    }
-
-    private func abbreviateDate(_ dateStr: String) -> String {
-        // Convert "2026-02-06" to "Feb 6"
-        let parts = dateStr.split(separator: "-")
-        guard parts.count == 3,
-              let month = Int(parts[1]),
-              let day = Int(parts[2]) else {
-            return dateStr
-        }
-        let months = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        return "\(months[month]) \(day)"
-    }
+enum ChartViewMode: String, CaseIterable {
+    case today = "Today"
+    case week = "Week"
 }
 
-// MARK: - Pace Chart
+// MARK: - Combined Usage & Pace Chart
 
-struct PaceChart: View {
-    let data: [PaceSnapshot]
+struct CombinedUsageChart: View {
+    let usageSnapshots: [UsageSnapshot]
+    let paceData: [PaceSnapshot]
+
+    @State private var viewMode: ChartViewMode = .today
+
+    // MARK: - Today View Data
+
+    private var todayUsageSnapshots: [UsageSnapshot] {
+        let startOfDay = Calendar.current.startOfDay(for: Date())
+        let startOfDayMs = Int64(startOfDay.timeIntervalSince1970 * 1000)
+        return usageSnapshots.filter { $0.timestamp >= startOfDayMs }
+    }
+
+    private var todayPaceData: [PaceSnapshot] {
+        let startOfDay = Calendar.current.startOfDay(for: Date())
+        let startOfDayMs = Int64(startOfDay.timeIntervalSince1970 * 1000)
+        return paceData.filter { $0.timestamp >= startOfDayMs }
+    }
+
+    // MARK: - Week View Data (grouped by day)
+
+    private struct DayData: Identifiable {
+        let id: String  // "YYYY-MM-DD"
+        let date: Date
+        let daysAgo: Int
+        let usageSnapshots: [UsageSnapshot]
+        let paceSnapshots: [PaceSnapshot]
+
+        // Each day gets a unique color from the palette
+        var color: Color {
+            Self.dayColors[min(daysAgo, Self.dayColors.count - 1)]
+        }
+
+        // 7-day color palette - distinct colors for each day
+        static let dayColors: [Color] = [
+            Color(hue: 0.35, saturation: 0.8, brightness: 0.9),  // Today - bright green
+            Color(hue: 0.55, saturation: 0.7, brightness: 0.85), // Yesterday - teal
+            Color(hue: 0.60, saturation: 0.6, brightness: 0.8),  // 2 days - blue
+            Color(hue: 0.70, saturation: 0.5, brightness: 0.75), // 3 days - indigo
+            Color(hue: 0.80, saturation: 0.4, brightness: 0.7),  // 4 days - purple
+            Color(hue: 0.90, saturation: 0.35, brightness: 0.65),// 5 days - magenta
+            Color(hue: 0.95, saturation: 0.3, brightness: 0.6),  // 6 days - pink/gray
+        ]
+
+        var dayLabel: String {
+            if daysAgo == 0 { return "Today" }
+            if daysAgo == 1 { return "Yesterday" }
+            let formatter = DateFormatter()
+            formatter.dateFormat = "EEE"
+            return formatter.string(from: date)
+        }
+    }
+
+    private var weekData: [DayData] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+
+        var days: [DayData] = []
+
+        for daysAgo in 0..<7 {
+            guard let dayStart = calendar.date(byAdding: .day, value: -daysAgo, to: today) else { continue }
+            let dayStartMs = Int64(dayStart.timeIntervalSince1970 * 1000)
+            let dayEndMs = dayStartMs + 24 * 60 * 60 * 1000
+
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            let dayId = formatter.string(from: dayStart)
+
+            let dayUsage = usageSnapshots.filter { $0.timestamp >= dayStartMs && $0.timestamp < dayEndMs }
+            let dayPace = paceData.filter { $0.timestamp >= dayStartMs && $0.timestamp < dayEndMs }
+
+            // Only include days with data
+            if !dayUsage.isEmpty || !dayPace.isEmpty {
+                days.append(DayData(
+                    id: dayId,
+                    date: dayStart,
+                    daysAgo: daysAgo,
+                    usageSnapshots: dayUsage,
+                    paceSnapshots: dayPace
+                ))
+            }
+        }
+
+        return days.reversed()  // Oldest first for drawing order
+    }
+
+    // MARK: - Y-Axis Calculations (shared)
+
+    private var activeUsageSnapshots: [UsageSnapshot] {
+        viewMode == .today ? todayUsageSnapshots : usageSnapshots.filter { snapshot in
+            let sevenDaysAgo = Int64(Date().timeIntervalSince1970 * 1000) - 7 * 24 * 60 * 60 * 1000
+            return snapshot.timestamp >= sevenDaysAgo
+        }
+    }
+
+    private var activePaceData: [PaceSnapshot] {
+        viewMode == .today ? todayPaceData : paceData.filter { snapshot in
+            let sevenDaysAgo = Int64(Date().timeIntervalSince1970 * 1000) - 7 * 24 * 60 * 60 * 1000
+            return snapshot.timestamp >= sevenDaysAgo
+        }
+    }
+
+    private var maxCost: Double {
+        activeUsageSnapshots.map(\.cost).max() ?? 1
+    }
+
+    private var minCost: Double {
+        activeUsageSnapshots.map(\.cost).min() ?? 0
+    }
+
+    private var latestCost: Double {
+        todayUsageSnapshots.last?.cost ?? 0
+    }
 
     private var maxPace: Double {
-        data.map(\.pace).max() ?? 1
+        activePaceData.map(\.pace).max() ?? 1
+    }
+
+    private var minPace: Double {
+        activePaceData.map(\.pace).min() ?? 0
     }
 
     private var avgPace: Double {
-        guard !data.isEmpty else { return 0 }
-        return data.reduce(0) { $0 + $1.pace } / Double(data.count)
+        guard !todayPaceData.isEmpty else { return 0 }
+        return todayPaceData.reduce(0) { $0 + $1.pace } / Double(todayPaceData.count)
     }
+
+    private var combinedMin: Double {
+        min(minCost, minPace)
+    }
+
+    private var combinedMax: Double {
+        max(maxCost, maxPace)
+    }
+
+    private var niceYRange: (min: Double, max: Double) {
+        let niceMin = floor(combinedMin / 10) * 10
+        let niceMax = ceil(combinedMax / 10) * 10
+        return (niceMin, niceMax)
+    }
+
+    private var yAxisTicks: [Double] {
+        let range = niceYRange
+        guard range.max > range.min else { return [range.min] }
+        var ticks: [Double] = []
+        var current = range.min
+        while current <= range.max {
+            ticks.append(current)
+            current += 10
+        }
+        return ticks
+    }
+
+    // MARK: - Today View Time Range
+
+    private var timeRange: (start: Int64, end: Int64)? {
+        let allTimestamps = todayUsageSnapshots.map(\.timestamp) + todayPaceData.map(\.timestamp)
+        guard let minTs = allTimestamps.min(), let maxTs = allTimestamps.max() else {
+            return nil
+        }
+        return (minTs, maxTs)
+    }
+
+    private var hourlyTicks: [Int64] {
+        guard let range = timeRange else { return [] }
+
+        let calendar = Calendar.current
+        let hourMs: Int64 = 3600 * 1000
+
+        let startDate = Date(timeIntervalSince1970: Double(range.start) / 1000.0)
+        let startHour = calendar.dateInterval(of: .hour, for: startDate)?.start ?? startDate
+        let startHourMs = Int64(startHour.timeIntervalSince1970 * 1000)
+
+        let endDate = Date(timeIntervalSince1970: Double(range.end) / 1000.0)
+        let endHourStart = calendar.dateInterval(of: .hour, for: endDate)?.start ?? endDate
+        let endHourMs = Int64(endHourStart.timeIntervalSince1970 * 1000)
+        let roundedEndMs = endHourMs < range.end ? endHourMs + hourMs : endHourMs
+
+        var ticks: [Int64] = []
+        var currentMs = startHourMs
+
+        while currentMs <= roundedEndMs {
+            ticks.append(currentMs)
+            currentMs += hourMs
+        }
+
+        return ticks
+    }
+
+    private var extendedTimeRange: (start: Int64, end: Int64)? {
+        guard !hourlyTicks.isEmpty else { return timeRange }
+        return (hourlyTicks.first!, hourlyTicks.last!)
+    }
+
+    // MARK: - Body
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if data.isEmpty {
-                Text("No pace data yet")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.secondary)
+            // View mode toggle and legend
+            HStack(spacing: 16) {
+                // View mode picker
+                Picker("View", selection: $viewMode) {
+                    ForEach(ChartViewMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 120)
+
+                Spacer()
+
+                // Today's stats (using today's color)
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(todayColor)
+                        .frame(width: 8, height: 8)
+                    Text("$\(String(format: "%.0f", latestCost)) • $\(String(format: "%.0f", avgPace))/hr")
+                        .font(.system(size: 10, design: .monospaced))
+                }
+            }
+
+            if viewMode == .today {
+                todayChartView
             } else {
-                // Summary line
-                HStack {
-                    Text("Avg: $\(String(format: "%.2f", avgPace))/hr")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    Spacer()
-                    if let latest = data.last {
-                        Text("Latest: $\(String(format: "%.2f", latest.pace))/hr")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.secondary)
-                    }
-                }
+                weekChartView
+            }
+        }
+    }
 
-                // Line chart using Path
+    // MARK: - Today Chart View
+
+    // Get color for today (consistent between views)
+    private var todayColor: Color {
+        DayData.dayColors[0]  // Today is daysAgo = 0
+    }
+
+    @ViewBuilder
+    private var todayChartView: some View {
+        if todayUsageSnapshots.isEmpty && todayPaceData.isEmpty {
+            Text("No data yet today")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.secondary)
+        } else {
+            HStack(alignment: .top, spacing: 0) {
+                yAxisView
+
                 GeometryReader { geometry in
-                    if data.count > 1 {
-                        Path { path in
-                            let xStep = geometry.size.width / CGFloat(data.count - 1)
+                    let height = geometry.size.height
+                    let width = geometry.size.width
+                    let yRange = niceYRange
+                    let effectiveRange = yRange.max - yRange.min
+                    let rangeVal = effectiveRange > 0 ? effectiveRange : 1
 
-                            for (index, snapshot) in data.enumerated() {
-                                let x = CGFloat(index) * xStep
-                                let y = maxPace > 0
-                                    ? geometry.size.height - (CGFloat(snapshot.pace) / CGFloat(maxPace) * geometry.size.height)
-                                    : geometry.size.height
+                    ZStack {
+                        gridLines(width: width, height: height)
 
-                                if index == 0 {
-                                    path.move(to: CGPoint(x: x, y: y))
-                                } else {
-                                    path.addLine(to: CGPoint(x: x, y: y))
-                                }
-                            }
+                        if todayUsageSnapshots.count > 1, let range = extendedTimeRange {
+                            let timeSpan = Double(range.end - range.start)
+                            costAreaPath(snapshots: todayUsageSnapshots, range: range, timeSpan: timeSpan, yRange: yRange, rangeVal: rangeVal, width: width, height: height, color: todayColor)
+                            costLinePath(snapshots: todayUsageSnapshots, range: range, timeSpan: timeSpan, yRange: yRange, rangeVal: rangeVal, width: width, height: height, color: todayColor)
                         }
-                        .stroke(Color.cyan, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
 
-                        // Filled area under the line
-                        Path { path in
-                            let xStep = geometry.size.width / CGFloat(data.count - 1)
-
-                            path.move(to: CGPoint(x: 0, y: geometry.size.height))
-
-                            for (index, snapshot) in data.enumerated() {
-                                let x = CGFloat(index) * xStep
-                                let y = maxPace > 0
-                                    ? geometry.size.height - (CGFloat(snapshot.pace) / CGFloat(maxPace) * geometry.size.height)
-                                    : geometry.size.height
-                                path.addLine(to: CGPoint(x: x, y: y))
-                            }
-
-                            path.addLine(to: CGPoint(x: geometry.size.width, y: geometry.size.height))
-                            path.closeSubpath()
+                        if todayPaceData.count > 1, let range = extendedTimeRange {
+                            let timeSpan = Double(range.end - range.start)
+                            paceLinePath(snapshots: todayPaceData, range: range, timeSpan: timeSpan, yRange: yRange, rangeVal: rangeVal, width: width, height: height, color: todayColor)
                         }
-                        .fill(Color.cyan.opacity(0.2))
-                    } else if data.count == 1 {
-                        // Single point
-                        let y = maxPace > 0
-                            ? geometry.size.height - (CGFloat(data[0].pace) / CGFloat(maxPace) * geometry.size.height)
-                            : geometry.size.height / 2
-                        Circle()
-                            .fill(Color.cyan)
-                            .frame(width: 6, height: 6)
-                            .position(x: geometry.size.width / 2, y: y)
+
+                        xAxisTicks(width: width, height: height)
                     }
                 }
-                .frame(height: 60)
+                .frame(height: 400)
+            }
 
-                // Time range labels
-                if let first = data.first, let last = data.last {
-                    HStack {
-                        Text(formatTimestamp(first.timestamp))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Text(formatTimestamp(last.timestamp))
-                            .font(.system(size: 9, design: .monospaced))
+            xAxisLabels
+        }
+    }
+
+    // MARK: - Week Chart View
+
+    @ViewBuilder
+    private var weekChartView: some View {
+        if weekData.isEmpty {
+            Text("No data this week")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.secondary)
+        } else {
+            // Day legend
+            HStack(spacing: 8) {
+                ForEach(weekData.reversed().prefix(7)) { day in
+                    HStack(spacing: 3) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(day.color)
+                            .frame(width: 12, height: 3)
+                        Text(day.dayLabel)
+                            .font(.system(size: 8, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
+                }
+                Spacer()
+            }
+            .padding(.vertical, 4)
+
+            HStack(alignment: .top, spacing: 0) {
+                yAxisView
+
+                GeometryReader { geometry in
+                    let height = geometry.size.height
+                    let width = geometry.size.width
+                    let yRange = niceYRange
+                    let effectiveRange = yRange.max - yRange.min
+                    let rangeVal = effectiveRange > 0 ? effectiveRange : 1
+
+                    ZStack {
+                        gridLines(width: width, height: height)
+
+                        // Draw each day's lines (oldest first so newest is on top)
+                        ForEach(weekData) { day in
+                            let dayStartMs = Int64(day.date.timeIntervalSince1970 * 1000)
+                            let dayEndMs = dayStartMs + 24 * 60 * 60 * 1000
+                            let timeSpan = Double(dayEndMs - dayStartMs)
+
+                            // Cost line for this day
+                            if day.usageSnapshots.count > 1 {
+                                costLinePath(
+                                    snapshots: day.usageSnapshots,
+                                    range: (dayStartMs, dayEndMs),
+                                    timeSpan: timeSpan,
+                                    yRange: yRange,
+                                    rangeVal: rangeVal,
+                                    width: width,
+                                    height: height,
+                                    color: day.color
+                                )
+                            }
+
+                            // Pace line for this day
+                            if day.paceSnapshots.count > 1 {
+                                paceLinePath(
+                                    snapshots: day.paceSnapshots,
+                                    range: (dayStartMs, dayEndMs),
+                                    timeSpan: timeSpan,
+                                    yRange: yRange,
+                                    rangeVal: rangeVal,
+                                    width: width,
+                                    height: height,
+                                    color: day.color
+                                )
+                            }
+                        }
+
+                        // Hourly tick marks (0-24)
+                        weekXAxisTicks(width: width, height: height)
+                    }
+                }
+                .frame(height: 400)
+            }
+
+            weekXAxisLabels
+        }
+    }
+
+    // MARK: - Shared Components
+
+    @ViewBuilder
+    private var yAxisView: some View {
+        HStack(spacing: 2) {
+            VStack(alignment: .trailing, spacing: 0) {
+                ForEach(Array(yAxisTicks.reversed().enumerated()), id: \.offset) { _, tick in
+                    Text("$\(String(format: "%.0f", tick))")
+                        .font(.system(size: 7, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    if tick != yAxisTicks.first {
+                        Spacer()
+                    }
+                }
+            }
+            .frame(width: 32, height: 400)
+
+            VStack(spacing: 0) {
+                ForEach(Array(yAxisTicks.reversed().enumerated()), id: \.offset) { _, tick in
+                    Rectangle().fill(Color.gray.opacity(0.5)).frame(width: 4, height: 1)
+                    if tick != yAxisTicks.first {
+                        Spacer()
+                    }
+                }
+            }
+            .frame(width: 4, height: 400)
+        }
+    }
+
+    @ViewBuilder
+    private func gridLines(width: CGFloat, height: CGFloat) -> some View {
+        Path { path in
+            path.move(to: CGPoint(x: 0, y: height / 2))
+            path.addLine(to: CGPoint(x: width, y: height / 2))
+        }
+        .stroke(Color.gray.opacity(0.2), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+    }
+
+    @ViewBuilder
+    private func costAreaPath(snapshots: [UsageSnapshot], range: (start: Int64, end: Int64), timeSpan: Double, yRange: (min: Double, max: Double), rangeVal: Double, width: CGFloat, height: CGFloat, color: Color) -> some View {
+        Path { path in
+            path.move(to: CGPoint(x: 0, y: height))
+
+            for snapshot in snapshots {
+                let x = timeSpan > 0
+                    ? CGFloat(Double(snapshot.timestamp - range.start) / timeSpan) * width
+                    : width / 2
+                let normalizedCost = (snapshot.cost - yRange.min) / rangeVal
+                let y = height - (CGFloat(normalizedCost) * height)
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+
+            path.addLine(to: CGPoint(x: width, y: height))
+            path.closeSubpath()
+        }
+        .fill(color.opacity(0.15))
+    }
+
+    @ViewBuilder
+    private func costLinePath(snapshots: [UsageSnapshot], range: (start: Int64, end: Int64), timeSpan: Double, yRange: (min: Double, max: Double), rangeVal: Double, width: CGFloat, height: CGFloat, color: Color) -> some View {
+        Path { path in
+            for (index, snapshot) in snapshots.enumerated() {
+                let x = timeSpan > 0
+                    ? CGFloat(Double(snapshot.timestamp - range.start) / timeSpan) * width
+                    : width / 2
+                let normalizedCost = (snapshot.cost - yRange.min) / rangeVal
+                let y = height - (CGFloat(normalizedCost) * height)
+
+                if index == 0 {
+                    path.move(to: CGPoint(x: x, y: y))
+                } else {
+                    path.addLine(to: CGPoint(x: x, y: y))
+                }
+            }
+        }
+        .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+    }
+
+    @ViewBuilder
+    private func paceLinePath(snapshots: [PaceSnapshot], range: (start: Int64, end: Int64), timeSpan: Double, yRange: (min: Double, max: Double), rangeVal: Double, width: CGFloat, height: CGFloat, color: Color) -> some View {
+        Path { path in
+            for (index, snapshot) in snapshots.enumerated() {
+                let x = timeSpan > 0
+                    ? CGFloat(Double(snapshot.timestamp - range.start) / timeSpan) * width
+                    : width / 2
+                let normalizedPace = (snapshot.pace - yRange.min) / rangeVal
+                let y = height - (CGFloat(normalizedPace) * height)
+
+                if index == 0 {
+                    path.move(to: CGPoint(x: x, y: y))
+                } else {
+                    path.addLine(to: CGPoint(x: x, y: y))
+                }
+            }
+        }
+        .stroke(color.opacity(0.7), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+    }
+
+    @ViewBuilder
+    private func xAxisTicks(width: CGFloat, height: CGFloat) -> some View {
+        if let range = extendedTimeRange {
+            let timeSpan = Double(range.end - range.start)
+            ForEach(hourlyTicks, id: \.self) { tickMs in
+                if timeSpan > 0 {
+                    let x = CGFloat(Double(tickMs - range.start) / timeSpan) * width
+                    Path { path in
+                        path.move(to: CGPoint(x: x, y: height - 4))
+                        path.addLine(to: CGPoint(x: x, y: height))
+                    }
+                    .stroke(Color.gray.opacity(0.5), lineWidth: 1)
                 }
             }
         }
     }
 
-    private func formatTimestamp(_ timestamp: Int64) -> String {
+    @ViewBuilder
+    private func weekXAxisTicks(width: CGFloat, height: CGFloat) -> some View {
+        // Show ticks every 4 hours (0, 4, 8, 12, 16, 20, 24)
+        ForEach([0, 4, 8, 12, 16, 20, 24], id: \.self) { hour in
+            let x = CGFloat(hour) / 24.0 * width
+            Path { path in
+                path.move(to: CGPoint(x: x, y: height - 4))
+                path.addLine(to: CGPoint(x: x, y: height))
+            }
+            .stroke(Color.gray.opacity(0.5), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var xAxisLabels: some View {
+        if let range = extendedTimeRange {
+            GeometryReader { geometry in
+                let width = geometry.size.width
+                let timeSpan = Double(range.end - range.start)
+
+                ZStack(alignment: .leading) {
+                    ForEach(hourlyTicks, id: \.self) { tickMs in
+                        if timeSpan > 0 {
+                            let x = CGFloat(Double(tickMs - range.start) / timeSpan) * width
+                            Text(formatHourShort(tickMs))
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .position(x: x, y: 6)
+                        }
+                    }
+                }
+            }
+            .frame(height: 16)
+            .padding(.leading, 36)
+        }
+    }
+
+    @ViewBuilder
+    private var weekXAxisLabels: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+
+            ZStack(alignment: .leading) {
+                ForEach([0, 4, 8, 12, 16, 20, 24], id: \.self) { hour in
+                    let x = CGFloat(hour) / 24.0 * width
+                    Text(hour == 24 ? "12a" : (hour == 0 ? "12a" : (hour == 12 ? "12p" : "\(hour % 12)\(hour < 12 ? "a" : "p")")))
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .position(x: x, y: 6)
+                }
+            }
+        }
+        .frame(height: 16)
+        .padding(.leading, 36)
+    }
+
+    // MARK: - Helpers
+
+    private func formatHourShort(_ timestamp: Int64) -> String {
         let date = Date(timeIntervalSince1970: Double(timestamp) / 1000.0)
         let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d"
-        return formatter.string(from: date)
+        formatter.dateFormat = "ha"
+        return formatter.string(from: date).lowercased()
     }
 }

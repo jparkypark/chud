@@ -1,6 +1,24 @@
 import SwiftUI
 import AppKit
 
+/// Notification for tab cycling
+extension Notification.Name {
+    static let cycleTab = Notification.Name("cycleTab")
+}
+
+/// Custom panel that intercepts Tab/Shift+Tab for tab cycling
+final class KeyInterceptingPanel: NSPanel {
+    override func keyDown(with event: NSEvent) {
+        // Tab key
+        if event.keyCode == 48 {
+            let forward = !event.modifierFlags.contains(.shift)
+            NotificationCenter.default.post(name: .cycleTab, object: forward)
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
 /// A floating panel that stays on top of all windows
 final class FloatingPanelController: NSObject {
     private var panel: NSPanel?
@@ -35,7 +53,7 @@ final class FloatingPanelController: NSObject {
     }
 
     private func createPanel(with view: some View) {
-        let panel = NSPanel(
+        let panel = KeyInterceptingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 720),
             styleMask: [.titled, .closable, .resizable, .nonactivatingPanel],
             backing: .buffered,

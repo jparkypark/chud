@@ -64,9 +64,10 @@ struct PanelContainerView: View {
         .onAppear {
             isFocused = true
         }
-        .onKeyPress(.tab) {
-            cycleTab()
-            return .handled
+        .onReceive(NotificationCenter.default.publisher(for: .cycleTab)) { notification in
+            if let forward = notification.object as? Bool {
+                cycleTab(forward: forward)
+            }
         }
         .onKeyPress(.escape) {
             onClose()
@@ -74,10 +75,12 @@ struct PanelContainerView: View {
         }
     }
 
-    private func cycleTab() {
+    private func cycleTab(forward: Bool) {
         let allTabs = PanelTab.allCases
         guard let currentIndex = allTabs.firstIndex(of: selectedTab) else { return }
-        let nextIndex = (currentIndex + 1) % allTabs.count
+        let nextIndex = forward
+            ? (currentIndex + 1) % allTabs.count
+            : (currentIndex - 1 + allTabs.count) % allTabs.count
         selectedTab = allTabs[nextIndex]
     }
 }
@@ -145,67 +148,34 @@ struct SessionsContentView: View {
 // MARK: - Analytics Content (simplified wrapper)
 
 struct AnalyticsContentView: View {
-    @State private var timeRange: TimeRange = .month
-    @State private var heatmapData: [HeatmapCell] = []
-    @State private var projectData: [ProjectTime] = []
+    @State private var usageSnapshots: [UsageSnapshot] = []
+    @State private var paceData: [PaceSnapshot] = []
 
     private let dbClient = DatabaseClient()
-    private let days = ["S", "M", "T", "W", "T", "F", "S"]
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // Time range picker
-                HStack {
-                    Spacer()
-                    Picker("Time Range", selection: $timeRange) {
-                        ForEach(TimeRange.allCases, id: \.self) { range in
-                            Text(range.label).tag(range)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 200)
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
+        VStack(alignment: .leading, spacing: 16) {
+            // Combined Usage & Pace Chart
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Usage & Pace")
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundColor(.secondary)
 
-                // Activity Heatmap
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Activity")
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .foregroundColor(.secondary)
-
-                    HeatmapGrid(data: heatmapData, days: days)
-                }
-                .padding(.horizontal, 16)
-
-                Divider()
-                    .padding(.horizontal, 16)
-
-                // Project Breakdown
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Projects")
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .foregroundColor(.secondary)
-
-                    ProjectBreakdownChart(data: Array(projectData.prefix(8)))
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 16)
+                CombinedUsageChart(usageSnapshots: usageSnapshots, paceData: paceData)
             }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+
+            Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onChange(of: timeRange) { _, newValue in
-            loadData(days: newValue.rawValue)
-        }
         .onAppear {
-            loadData(days: timeRange.rawValue)
+            loadData()
         }
     }
 
-    private func loadData(days: Int) {
-        heatmapData = dbClient.getActivityHeatmap(days: days)
-        projectData = dbClient.getProjectBreakdown(days: days)
+    private func loadData() {
+        usageSnapshots = dbClient.getUsageSnapshots(days: 7)
+        paceData = dbClient.getPaceSnapshots(days: 7)
     }
 }

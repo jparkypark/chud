@@ -28,6 +28,12 @@ struct PaceSnapshot {
     let pace: Double
 }
 
+/// Represents a usage snapshot (cumulative cost at point in time)
+struct UsageSnapshot {
+    let timestamp: Int64
+    let cost: Double
+}
+
 /// Client for reading session data from the shared SQLite database.
 /// Uses the SQLite3 C API directly for maximum compatibility.
 class DatabaseClient {
@@ -307,6 +313,39 @@ class DatabaseClient {
             let timestamp = sqlite3_column_int64(statement, 0)
             let pace = sqlite3_column_double(statement, 1)
             results.append(PaceSnapshot(timestamp: timestamp, pace: pace))
+        }
+
+        return results
+    }
+
+    /// Returns usage snapshots for the past N days
+    func getUsageSnapshots(days: Int = 28) -> [UsageSnapshot] {
+        guard open() else { return [] }
+        defer { close() }
+
+        var results: [UsageSnapshot] = []
+        let cutoffMs = (Int64(Date().timeIntervalSince1970) - Int64(days * 86400)) * 1000
+
+        let query = """
+            SELECT timestamp, cost
+            FROM usage_snapshots
+            WHERE timestamp >= ?
+            ORDER BY timestamp ASC
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else {
+            print("[chud] Failed to prepare usage snapshots query")
+            return []
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_int64(statement, 1, cutoffMs)
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let timestamp = sqlite3_column_int64(statement, 0)
+            let cost = sqlite3_column_double(statement, 1)
+            results.append(UsageSnapshot(timestamp: timestamp, cost: cost))
         }
 
         return results

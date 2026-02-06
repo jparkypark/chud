@@ -65,6 +65,7 @@ async function main() {
         const data = segment.getCachedData();
         if (data) {
           db.recordDailyUsage(data.date, data.cost, data.inputTokens, data.outputTokens);
+          db.recordUsageSnapshot(data.cost);  // Also record snapshot for time-series chart
         }
       }
       if (segment instanceof PaceSegment) {

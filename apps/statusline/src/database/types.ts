@@ -48,3 +48,11 @@ export interface PaceSnapshot {
   timestamp: number;
   pace: number;
 }
+
+/**
+ * Usage snapshot for charts (cumulative cost at a point in time)
+ */
+export interface UsageSnapshot {
+  timestamp: number;
+  cost: number;
+}
